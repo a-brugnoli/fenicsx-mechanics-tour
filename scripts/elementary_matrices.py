@@ -1,10 +1,11 @@
 import numpy as np
-from ufl import sym, grad, Identity, tr, inner, Measure, TestFunction, TrialFunction
+import ufl
 from mpi4py import MPI
 from dolfinx import fem
 from dolfinx.mesh import create_box, CellType
-from scipy.sparse import csr_matrix, save_npz
 import os
+
+
 results_dir = os.path.dirname(os.path.abspath(__file__)) + "/results/"
 if not os.path.exists(results_dir):
     os.makedirs(results_dir)
@@ -12,7 +13,7 @@ if not os.path.exists(results_dir):
 
 
 # Physical parameters (waveguide 1)
-rho = 2700  # density [kg/m^3]
+rho = 7800  # density [kg/m^3]
 E = 2*1.e11  # Young's modulus [N/m^2]
 nu = 0.3  # Poisson's ratio [-]
 eta = 0.01  # damping ratio [-]
@@ -31,37 +32,44 @@ parametric_cell = create_box(
     cell_type=CellType.hexahedron,
 )
 
+coordinates_cell = parametric_cell.geometry.x
+connectivity_cell = parametric_cell.topology.connectivity(3, 0).array.reshape(-1, 8)
+
+np.save(results_dir + "coordinates_nodes_parametric_cell.npy", coordinates_cell)
+np.save(results_dir + "connectivity_parametric_cell.npy", connectivity_cell)
+
+print(f"Coordinates parametric cell {coordinates_cell}")
+print(f"Connectivity parametric cell {connectivity_cell}")
 
 dim = parametric_cell.topology.dim
 print(f"Mesh topology dimension d={dim}.")
 shape = (dim, )
 
 def epsilon(v):
-    return sym(grad(v))
+    return ufl.sym(ufl.grad(v))
 
 
 def sigma(v):
-    return lmbda * tr(epsilon(v)) * Identity(dim) + 2 * mu * epsilon(v)
+    return lmbda * ufl.tr(epsilon(v)) * ufl.Identity(dim) + 2 * mu * epsilon(v)
 
 V_cell = fem.functionspace(parametric_cell, ("Lagrange", 1, shape))
-u_cell = TrialFunction(V_cell)
-v_cell = TestFunction(V_cell)
+u_cell = ufl.TrialFunction(V_cell)
+v_cell = ufl.TestFunction(V_cell)
 
-dx_cell = Measure("dx", domain=parametric_cell)
+dx_cell = ufl.Measure("dx", domain=parametric_cell)
 
-k_form_cell = fem.form(inner(sigma(u_cell), epsilon(v_cell)) * dx_cell)
-m_form_cell = fem.form(rho * inner(u_cell, v_cell) * dx_cell)
+k_form_cell = fem.form(ufl.inner(sigma(u_cell), epsilon(v_cell)) * dx_cell)
+m_form_cell = fem.form(rho * ufl.inner(u_cell, v_cell) * dx_cell)
 
 k_scipy_cell = fem.assemble_matrix(k_form_cell).to_scipy()
-m_scipy_cell = fem.assemble_matrix(m_form_cell).to_scipy()
-
-print(type(k_scipy_cell))
-
 k_cell = k_scipy_cell.todense()
+
+m_scipy_cell = fem.assemble_matrix(m_form_cell).to_scipy()
 m_cell = m_scipy_cell.todense()
 
-print(k_cell.shape)
-print(m_cell.shape)
+print(f"Total mass cell fem {m_cell.sum(axis=1).sum()/3}")
+print(f"Total mass cell  {rho * 8}")
+
 np.save(results_dir + "k_cell.npy", k_cell)
 np.save(results_dir + "m_cell.npy", m_cell)
 
@@ -75,23 +83,73 @@ structure = create_box(
     cell_type=CellType.hexahedron,
 )
 
+def left(x):
+    return np.isclose(x[0], 0)
+
+
+def right(x):
+    return np.isclose(x[0], d)
+
+coordinates_structure = structure.geometry.x
+connectivity_structure = structure.topology.connectivity(3, 0).array.reshape(-1, 8)
+
+np.save(results_dir + "coordinates_nodes_structure.npy", coordinates_structure)
+np.save(results_dir + "connectivity_structure.npy", connectivity_structure)
+
+assert connectivity_structure.shape[0] == Ny * Nz
+
 V_structure = fem.functionspace(structure, ("Lagrange", 1, shape))
 
-u_structure = TrialFunction(V_structure)
-v_structure = TestFunction(V_structure)
+left_dofs_structure = fem.locate_dofs_geometrical(V_structure, left)
+right_dofs_structure = fem.locate_dofs_geometrical(V_structure, right)
 
-dx_structure = Measure("dx", domain=structure)
+np.save(results_dir + "left_dofs_structure.npy", left_dofs_structure)
+np.save(results_dir + "right_dofs_structure.npy", right_dofs_structure)
 
-k_form_structure = fem.form(inner(sigma(u_structure), epsilon(v_structure)) * dx_structure)
-m_form_structure = fem.form(rho * inner(u_structure, v_structure) * dx_structure)
+u_structure = ufl.TrialFunction(V_structure)
+v_structure = ufl.TestFunction(V_structure)
 
+dx_structure = ufl.Measure("dx", domain=structure)
+
+k_form_structure = fem.form(ufl.inner(sigma(u_structure), epsilon(v_structure)) * dx_structure)
 k_scipy_structure = fem.assemble_matrix(k_form_structure).to_scipy()
-m_scipy_structure = fem.assemble_matrix(m_form_structure).to_scipy()
-
 k_structure = k_scipy_structure.todense()
+
+
+m_form_structure = fem.form(rho * ufl.inner(u_structure, v_structure) * dx_structure)
+m_scipy_structure = fem.assemble_matrix(m_form_structure).to_scipy()
 m_structure = m_scipy_structure.todense()
 
-print(k_structure.shape)    
-print(m_structure.shape)
+print(f"Total mass structure fem {m_structure.sum(axis=1).sum()/3}")
+print(f"Total mass structure  {rho * d*h_y*h_z}")
+
+print(f"Stiffness matrix structure shape: {k_structure.shape}")    
+print(f"Mass matrix structure shape: {m_structure.shape}")  
 np.save(results_dir + "k_structure.npy", k_structure)
 np.save(results_dir + "m_structure.npy", m_structure)
+
+
+# Get the Jacobian of the mapping
+J_structure = ufl.Jacobian(structure)
+
+# Compute the Jacobian determinant
+J_det = ufl.det(J_structure)
+
+# Create a function to evaluate the Jacobian (discontinuous piecewise linear function)
+dg1_space = fem.functionspace(structure, ("DG", 1))
+J_func = fem.Function(dg1_space)
+
+# J_func.interpolate(J_det)
+
+# Integrate the Jacobian determinant over the domain
+J_det_form = J_det * dx_structure
+J_det_integral = fem.assemble_scalar(fem.form(J_det_form))
+
+print("Jacobian of mapping:")
+print("Jacobian matrix:", J_structure)
+print("Jacobian determinant:", J_det)
+print("Integrated Jacobian determinant:", J_det_integral)
+
+
+# np.save(results_dir + "determinant_jacobian.npy", J_func.vector[:])
+np.save(results_dir + "determinant_integrand.npy", connectivity_structure)
