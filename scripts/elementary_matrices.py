@@ -152,4 +152,4 @@ print("Integrated Jacobian determinant:", J_det_integral)
 
 
 # np.save(results_dir + "determinant_jacobian.npy", J_func.vector[:])
-np.save(results_dir + "determinant_integrand.npy", connectivity_structure)
+np.save(results_dir + "determinant_integrand.npy", J_det_integral)
